@@ -1,0 +1,167 @@
+--[[
+    BBN Dumper — Loader (Delta + Velocity compatible)
+    Downloads patched USSI (ByteFall-only decompiler) and runs it.
+    Output: <GameName>.rbxl in your executor's workspace folder.
+]]
+
+local SSI_URL = "https://raw.githubusercontent.com/bezenadduca-code/USSI/refs/heads/main/saveinstance.luau"
+
+-- ─── 0. Resolve HTTP function (Delta: request, Velocity: httpRequest) ─
+local httpReq =
+    (syn and syn.request)
+    or (http and http.request)
+    or http_request
+    or (fluxus and fluxus.request)
+    or request
+    or httpRequest
+    or (krnl and krnl.request)
+    or (Krnl and Krnl.request)
+
+if not httpReq then
+    error("[BBN] No HTTP request function found. Your executor doesn't expose one.")
+end
+
+-- ─── 1. Download ─────────────────────────────────────────────
+print("[BBN] Downloading saveinstance from GitHub…")
+
+local src
+do
+    -- Try the resolved httpReq first
+    local reqOk, res = pcall(httpReq, {
+        Url    = SSI_URL,
+        Method = "GET",
+    })
+    if reqOk and res and (res.StatusCode or res.Status) == 200 and res.Body then
+        src = res.Body
+    else
+        -- Fallback: game:HttpGet (some executors route this differently)
+        local ok, body = pcall(game.HttpGet, game, SSI_URL, true)
+        if ok and type(body) == "string" then
+            src = body
+        end
+    end
+end
+
+if not src or type(src) ~= "string" then
+    error("[BBN] Failed to download saveinstance from GitHub.")
+end
+
+print(string.format("[BBN] Downloaded %.1f KB", #src / 1024))
+
+if #src < 80000 then
+    warn("[BBN] WARNING: File looks truncated (only " .. #src .. " bytes).")
+end
+
+-- ─── 2. Load ─────────────────────────────────────────────────
+print("[BBN] Loading…")
+
+if not loadstring then
+    error("[BBN] loadstring is disabled in your executor. Enable it or use a different executor.")
+end
+
+local saveinstance = loadstring(src, "saveinstance")()
+assert(type(saveinstance) == "function",
+    "[BBN] saveinstance did not return a function — file is truncated or corrupted")
+
+-- ─── 3. Fetch game name ──────────────────────────────────────
+local HttpService = game:GetService("HttpService")
+
+local function sanitizeFileName(name)
+    local clean = tostring(name):gsub("[^%w%-%._ ]", "")
+    clean = clean:gsub("%s+", " ")
+    clean = clean:gsub("^%s+", "")
+    clean = clean:gsub("%s+$", "")
+    if #clean == 0 then clean = "Game" end
+    if #clean > 120 then clean = clean:sub(1, 120) end
+    return clean
+end
+
+local gameName
+do
+    local ok, info = pcall(function()
+        return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+    end)
+
+    if ok and info and info.Name and #info.Name > 0 then
+        gameName = sanitizeFileName(info.Name)
+        print(string.format("[BBN] Game name: %s", gameName))
+    else
+        local reqOk, res = pcall(httpReq, {
+            Url    = "https://games.roblox.com/v1/games?universeIds=" .. game.GameId,
+            Method = "GET",
+        })
+        if reqOk and res and (res.StatusCode or res.Status) == 200 and res.Body then
+            local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+            if decodeOk and data and data.data and data.data[1] and data.data[1].name then
+                gameName = sanitizeFileName(data.data[1].name)
+                print(string.format("[BBN] Game name (API): %s", gameName))
+            end
+        end
+    end
+
+    if not gameName then
+        gameName = "Game_" .. tostring(game.PlaceId)
+        print(string.format("[BBN] Could not fetch name; using: %s", gameName))
+    end
+end
+
+-- ─── 4. Run ──────────────────────────────────────────────────
+print("[BBN] Starting dump…")
+
+saveinstance({
+    -- Output ─────────────────────────────────────────────
+    FilePath               = gameName,
+
+    -- Format ─────────────────────────────────────────────
+    Binary                 = true,
+    CompressionMode        = "zstd",
+    CompressionLevel       = 9,
+
+    -- Decompilation (routes through ByteFall via the patch) ─
+    Decompile              = true,
+    DecompileTimeout       = 30,
+    SaveBytecode           = false,
+    scriptcache            = true,
+
+    -- Keep StarterPlayer scripts ─────────────────────────
+    IgnoreDefaultPlayerScripts = false,
+
+    -- Player/character capture ───────────────────────────
+    IsolateStarterPlayer        = true,
+    IsolateLocalPlayer          = true,
+    IsolateLocalPlayerCharacter = true,
+    SavePlayerCharacters        = true,
+    IsolatePlayers              = false,
+
+    -- Performance / safety ───────────────────────────────
+    BoostFPS               = true,
+    KillAllScripts         = false,
+    AntiIdle               = true,
+    ShowStatus             = true,
+    ShutdownWhenDone       = false,
+    SafeMode               = false,
+
+    -- What to include ────────────────────────────────────
+    NilInstances           = false,
+    IgnoreNotArchivable    = true,
+    IgnoreDefaultProperties = true,
+
+    -- What to skip ───────────────────────────────────────
+    IgnoreList = {
+        "CoreGui",
+        "CorePackages",
+        Packages = false,
+    },
+    DecompileIgnore = {
+        "TextChatService",
+    },
+
+    -- Misc ───────────────────────────────────────────────
+    AlternativeWritefile   = true,
+    TreatUnionsAsParts     = false,
+    Anonymous              = false,
+    CopyToClipboard        = false,
+    ReadMe                 = true,
+})
+
+print(string.format("[BBN] Done. Look for %s.rbxl in your executor's workspace folder.", gameName))
